@@ -65,6 +65,7 @@ def todos_note() -> str:
 
 def build_context() -> dict:
     """The block we append to the messages list on every turn."""
+    from tools import PLAYGROUND_DIR
     stale = stale_files()
     stale_section = (
         "files changed since last read:\n" + "\n".join(f"  - {p}" for p in stale)
@@ -78,6 +79,7 @@ def build_context() -> dict:
             "<env>\n"
             f"time: {datetime.now().strftime('%Y-%m-%d %H:%M')}\n"
             f"branch: {git_branch()}\n"
+            f"working dir: {PLAYGROUND_DIR}\n"
             f"git status:\n{git_status()}\n"
             f"{stale_section}\n"
             "</env>"

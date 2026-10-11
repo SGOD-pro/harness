@@ -1,16 +1,45 @@
 import subprocess
+from pathlib import Path
 from context import note_read
 from skills import read_skill as _read_skill
 from todos import write_todos as _write_todos, update_todo as _update_todo
+from subagent import task
+
+# ── sandbox root — all file operations are confined to this directory ─────────
+PLAYGROUND_DIR = (Path(__file__).parent / "playground").resolve()
+PLAYGROUND_DIR.mkdir(exist_ok=True)
+
+
+def _safe_path(path: str) -> tuple[Path, str | None]:
+    """
+    Resolve path relative to PLAYGROUND_DIR and check it stays inside.
+    Returns (resolved_path, None) on success or (None, error_string) if
+    the path escapes the playground.
+    """
+    try:
+        # Accept both absolute and relative paths
+        p = Path(path)
+        if not p.is_absolute():
+            p = PLAYGROUND_DIR / p
+        resolved = p.resolve()
+        # Enforce boundary
+        resolved.relative_to(PLAYGROUND_DIR)
+        return resolved, None
+    except ValueError:
+        return None, (
+            f"Access denied: '{path}' is outside the playground directory "
+            f"({PLAYGROUND_DIR}). All file operations must stay inside playground/."
+        )
 import sandbox as _sandbox
 
 # ── tool implementations ───────────────────────────────────────────────────────
 
 def bash(command: str) -> str:
     """Run a shell command inside the sandbox and return its output."""
-    result = _sandbox.run(command, capture_output=True, text=True)
+    # Force working directory to playground so relative paths resolve correctly
+    full_command = f"cd {PLAYGROUND_DIR} && {command}"
+    result = _sandbox.run(full_command, capture_output=True, text=True)
     output = result.stdout + result.stderr
-    # Hard cap to prevent giant outputs from blowing the context window
     lines = output.splitlines()
     if len(lines) > 200:
         output = "\n".join(lines[:200]) + f"\n… ({len(lines) - 200} more lines truncated)"
@@ -20,24 +49,23 @@ def bash(command: str) -> str:
 
 
 def read_file(path: str, line_start: int = None, line_end: int = None) -> str:
-    """Read a file and return its contents, optionally sliced by line range."""
+    """Read a file from the playground directory."""
+    resolved, err = _safe_path(path)
+    if err:
+        return err
     try:
-        p = Path(path)
-        if p.is_dir():
-            # Give a helpful nudge instead of an opaque error
-            entries = sorted(p.iterdir())
+        if resolved.is_dir():
+            entries = sorted(resolved.iterdir())
             names   = "\n".join(
                 ("  [dir]  " if e.is_dir() else "  [file] ") + e.name
                 for e in entries
             )
             return (
                 f"Error: '{path}' is a directory, not a file.\n"
-                f"Use list_dir to explore it, or bash to inspect it.\n\n"
-                f"Contents of {path}:\n{names}"
+                f"Use list_dir to explore it.\n\nContents:\n{names}"
             )
-        note_read(path)
-        with open(p, "r") as f:
-            lines = f.readlines()
+        note_read(str(resolved))
+        lines = resolved.read_text(errors="replace").splitlines(keepends=True)
         if line_start is not None or line_end is not None:
             start = (line_start - 1) if line_start else 0
             end   = line_end if line_end else len(lines)
@@ -48,45 +76,61 @@ def read_file(path: str, line_start: int = None, line_end: int = None) -> str:
 
 
 def list_dir(path: str = ".") -> str:
-    """List the contents of a directory."""
+    """List the contents of a directory inside the playground."""
+    resolved, err = _safe_path(path)
+    if err:
+        return err
     try:
-        p       = Path(path)
-        entries = sorted(p.iterdir())
+        if not resolved.exists():
+            return f"Error: path '{path}' does not exist."
+        if not resolved.is_dir():
+            return f"Error: '{path}' is a file, not a directory. Use read_file."
+        entries = sorted(resolved.iterdir())
         lines   = []
         for e in entries:
             tag  = "[dir] " if e.is_dir() else "[file]"
             size = f"  {e.stat().st_size:>8} bytes" if e.is_file() else ""
             lines.append(f"  {tag} {e.name}{size}")
-        return f"{path}/\n" + "\n".join(lines) if lines else f"{path}/ (empty)"
+        # Show path relative to playground so the model sees "." not "playground/"
+        try:
+            display = str(resolved.relative_to(PLAYGROUND_DIR))
+        except ValueError:
+            display = str(resolved)
+        header = display if display != "." else "(root)"
+        return f"{header}/\n" + "\n".join(lines) if lines else f"{header}/ (empty)"
     except Exception as e:
         return f"Error listing directory: {e}"
 
 
 def write_file(path: str, content: str) -> str:
-    """Write content to a file."""
+    """Write a file inside the playground directory, creating parents if needed."""
+    resolved, err = _safe_path(path)
+    if err:
+        return err
     try:
-        with open(path, "w") as f:
-            f.write(content)
-        return f"Successfully wrote to {path}"
+        resolved.parent.mkdir(parents=True, exist_ok=True)
+        resolved.write_text(content)
+        return f"Successfully wrote to {resolved.relative_to(PLAYGROUND_DIR)}"
     except Exception as e:
         return f"Error writing file: {e}"
 
 
 def str_replace(path: str, old_str: str, new_str: str, allow_multi_edit: bool = False) -> str:
-    """Replace a string in a file. By default fails if old_str matches multiple times unless allow_multi_edit is True."""
+    """Replace a string in a file inside the playground directory."""
+    resolved, err = _safe_path(path)
+    if err:
+        return err
     try:
-        with open(path, "r") as f:
-            content = f.read()
-        count = content.count(old_str)
+        content = resolved.read_text()
+        count   = content.count(old_str)
         if count == 0:
             return f"Error: old_str not found in {path}"
         if count > 1 and not allow_multi_edit:
-            return f"Error: old_str matches {count} locations in {path} — make it more specific or set allow_multi_edit=true"
+            return f"Error: old_str matches {count} locations — be more specific or set allow_multi_edit=true"
         updated = content.replace(old_str, new_str)
-        with open(path, "w") as f:
-            f.write(updated)
+        resolved.write_text(updated)
         replaced = count if allow_multi_edit else 1
-        return f"Successfully replaced {replaced} occurrence(s) in {path}"
+        return f"Successfully replaced {replaced} occurrence(s) in {resolved.relative_to(PLAYGROUND_DIR)}"
     except Exception as e:
         return f"Error editing file: {e}"
 
@@ -259,16 +303,62 @@ TOOL_SCHEMAS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "task",
+            "description": (
+                "Spawn a read-only subagent to explore the codebase and answer one question. "
+                "Use this when you need to understand how something works — where a feature "
+                "lives, how data flows, what calls what — instead of grepping yourself. "
+                "The subagent explores in its own context window and hands you back just the "
+                "findings, so the search does not fill yours. "
+                "It cannot see this conversation, so write the question so it stands alone. "
+                "Do all editing yourself; the subagent only reads. "
+                "You can call task multiple times in the same response for independent "
+                "questions — they run in parallel and each returns only its final answer."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "description": {
+                        "type": "string",
+                        "description": "The self-contained question or exploration task for the subagent.",
+                    }
+                },
+                "required": ["description"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_dir",
+            "description": "List the contents of a directory. Use this instead of read_file when given a directory path.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Path to the directory to list (defaults to current directory)",
+                    }
+                },
+                "required": [],
+            },
+        },
+    },
 ]
 
 # ── dispatch map (name → function) ────────────────────────────────────────────
 
 TOOLS = {
-    "bash": bash,
-    "read_file": read_file,
-    "write_file": write_file,
+    "task":        task,
+    "bash":        bash,
+    "read_file":   read_file,
+    "list_dir":    list_dir,
+    "write_file":  write_file,
     "str_replace": str_replace,
-    "read_skill": read_skill,
+    "read_skill":  read_skill,
     "write_todos": write_todos,
     "update_todo": update_todo,
 }

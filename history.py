@@ -51,6 +51,15 @@ def log_dir() -> Path:
     return _LOG_DIR
 
 
+# Optional callback fired every time a log file is written.
+# main.py sets this to a rich console.print so the user sees the spill.
+_spill_notify = None
+
+def set_spill_notify(fn) -> None:
+    global _spill_notify
+    _spill_notify = fn
+
+
 # ── spill / cap ───────────────────────────────────────────────────────────────
 
 CAP     = 2_000   # chars kept inline; rest spills to a log file
@@ -64,6 +73,8 @@ def spill(text: str, label: str = "") -> Path:
     suffix = f"-{label}" if label else ""
     path   = _LOG_DIR / f"{_log_counter:04d}{suffix}-log.txt"
     path.write_text(text, encoding="utf-8")
+    if _spill_notify:
+        _spill_notify(path, len(text), label)
     return path
 
 
