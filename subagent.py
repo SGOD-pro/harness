@@ -72,6 +72,9 @@ def task(description: str) -> str:
     # Spill the full subagent transcript to a log file for debugging
     from history import spill as _spill
 
+    call_history = []
+    halt_subagent = False
+
     for _ in range(MAX_TURNS):
         message, usage = call_llm(messages, tools=toolset)
         messages.append(message.model_dump(exclude_none=True))
@@ -86,13 +89,30 @@ def task(description: str) -> str:
 
         for tool_call in message.tool_calls:
             name = tool_call.function.name
-            if name in WITHHELD:
+            raw_args = tool_call.function.arguments
+            call_sig = (name, raw_args.strip())
+            call_history.append(call_sig)
+
+            # Check consecutive repetitions
+            consecutive = 0
+            for s in reversed(call_history):
+                if s == call_sig:
+                    consecutive += 1
+                else:
+                    break
+
+            if consecutive >= 3:
+                result = f"Error: loop limit reached for '{name}'. Halting subagent exploration."
+                halt_subagent = True
+            elif consecutive == 2:
+                result = f"Error: you already called '{name}' with these arguments. Try a different query or summarize findings."
+            elif name in WITHHELD:
                 result = f"Tool '{name}' is not available to subagents."
             elif name not in TOOLS:
                 result = f"Unknown tool '{name}'."
             else:
                 try:
-                    args    = json.loads(tool_call.function.arguments)
+                    args    = json.loads(raw_args)
                     fn      = TOOLS[name]
                     valid   = inspect.signature(fn).parameters
                     cleaned = {k: v for k, v in args.items() if k in valid}
@@ -105,6 +125,12 @@ def task(description: str) -> str:
                 "tool_call_id": tool_call.id,
                 "content":      str(result)[:4000],   # cap subagent tool results too
             })
+
+            if halt_subagent:
+                break
+
+        if halt_subagent:
+            break
 
     # Write full transcript to a task log for debugging
     import json as _json

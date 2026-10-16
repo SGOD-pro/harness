@@ -1,62 +1,34 @@
 """
-Linked list implementation with reverse function.
+List all models available on the AWS Bedrock account, sorted by model ID.
+
+Uses the same OpenAI-compatible endpoint as the harness agent.
 """
 
-class Node:
-    """Node of a singly linked list."""
-    def __init__(self, value, next_node=None):
-        self.value = value
-        self.next = next_node
+import os
+from dotenv import load_dotenv
+from openai import OpenAI
 
-    def __repr__(self):
-        return f"Node({self.value!r})"
+load_dotenv()
+
+client = OpenAI(
+    api_key=os.environ["AWS_BEARER_TOKEN_BEDROCK"],
+    base_url="https://bedrock-mantle.ap-south-1.api.aws/v1",
+)
 
 
-class LinkedList:
-    """Simple singly linked list."""
-    def __init__(self):
-        self.head = None
-        self.tail = None
-
-    def append(self, value):
-        node = Node(value)
-        if not self.head:
-            self.head = self.tail = node
-        else:
-            self.tail.next = node
-            self.tail = node
-
-    def __iter__(self):
-        current = self.head
-        while current:
-            yield current.value
-            current = current.next
-
-    def __repr__(self):
-        return "LinkedList([" + ", ".join(repr(v) for v in self) + "])"
-
-    def reverse(self):
-        """Return a new LinkedList that is the reverse of this list."""
-        reversed_list = LinkedList()
-        current = self.head
-        while current:
-            # Prepend values to reversed_list
-            node = Node(current.value, reversed_list.head)
-            reversed_list.head = node
-            if reversed_list.tail is None:
-                reversed_list.tail = node
-            current = current.next
-        # Update reversed_list.tail to the last node inserted
-        reversed_list.tail = reversed_list.head
-        while reversed_list.tail and reversed_list.tail.next:
-            reversed_list.tail = reversed_list.tail.next
-        return reversed_list
+def list_models() -> list:
+    """Fetch and return all available models, sorted by ID."""
+    response = client.models.list()
+    models   = list(response)
+    models.sort(key=lambda m: m.id.lower())
+    return models
 
 
 if __name__ == "__main__":
-    ll = LinkedList()
-    for i in range(5):
-        ll.append(i)
-    print("Original:", list(ll))
-    rev = ll.reverse()
-    print("Reversed:", list(rev))
+    models = list_models()
+    print(f"{'MODEL ID':<55}  {'OWNED BY'}")
+    print("-" * 75)
+    for m in models:
+        owned_by = getattr(m, "owned_by", "—") or "—"
+        print(f"{m.id:<55}  {owned_by}")
+    print(f"\n{len(models)} model(s) available.")

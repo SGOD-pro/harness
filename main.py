@@ -2,6 +2,7 @@ import json
 import ast
 import os
 import sys
+import re
 import time
 import threading
 import termios
@@ -66,9 +67,8 @@ PLAYGROUND = (Path(__file__).parent / "playground").resolve()
 PLAYGROUND.mkdir(exist_ok=True)
 
 SYSTEM_PROMPT = f"""
-You are a coding agent. Your job is to code. Always code.
-Use the available tools to inspect and modify files.
-Answer back to the user once exploration is done.
+You are a coding agent. Use the available tools to inspect, modify, and verify files to accomplish the user's task.
+Answer back to the user once your work is done.
 
 Your working directory is: {PLAYGROUND}
 ALL file operations (read, write, list, bash) are confined to this directory.
@@ -100,13 +100,15 @@ grep rather than asking for it again. That file only exists for the current
 turn, so read it now or re-run the command later.
 
 RULES:
+- When your task is completed and verified, STOP calling tools immediately and output your final response to the user.
 - Always prefer to ignore .venv, node_modules and other heavy library folders.
 - For multi-step tasks, start by calling write_todos to lay out your plan.
-- Update each todo with update_todo as you progress.
+- Update each todo with update_todo as you progress. When all todos are done, deliver your final report and stop.
 - NEVER search from / or ~ — always use relative paths from the working directory.
 - NEVER repeat a tool call that already returned an error for the same arguments — fix the arguments instead.
 - When write_file fails with "No such file or directory", the parent dir is missing — use bash mkdir -p first, or just call write_file again (it now auto-creates parents).
 - Do not call the same tool with the same args more than once without changing something.
+- Do not loop: if a tool call returns the same result or content you already have, move forward to the next step or conclude.
 
 CONTINUATION RULES (when you hit a turn limit or are asked to continue):
 - DO NOT restart the task from the beginning.
@@ -134,16 +136,31 @@ CONTINUATION RULES (when you hit a turn limit or are asked to continue):
 # ── helpers ───────────────────────────────────────────────────────────────────
 
 def parse_args(raw: str) -> dict:
+    if not raw or not raw.strip():
+        return {}
     try:
         return json.loads(raw)
     except json.JSONDecodeError:
-        try:
-            result = ast.literal_eval(raw)
-            if isinstance(result, dict):
-                return result
-        except Exception:
-            pass
-        raise ValueError(f"Could not parse tool arguments: {raw!r}")
+        pass
+    try:
+        result = ast.literal_eval(raw)
+        if isinstance(result, dict):
+            return result
+    except Exception:
+        pass
+    # Strip streaming artifacts or special tokens like <|...|>
+    cleaned = re.sub(r"<\|.*?\|>", "", raw).strip()
+    try:
+        return json.loads(cleaned)
+    except Exception:
+        pass
+    try:
+        obj, _ = json.JSONDecoder().raw_decode(cleaned)
+        if isinstance(obj, dict):
+            return obj
+    except Exception:
+        pass
+    raise ValueError(f"Could not parse tool arguments: {raw!r}")
 
 
 # ── 3×3 orbiting dot loader ───────────────────────────────────────────────────
@@ -339,9 +356,16 @@ def render_tool_call(name: str, args: dict, result: str | None = None) -> None:
     console.print(Panel(content, border_style="dim white", padding=(0, 1)))
 
 
-def render_late_injection(ctx: dict) -> None:
+_last_injected_content: str | None = None
+
+def render_late_injection(ctx: dict, force: bool = False) -> None:
+    global _last_injected_content
+    content = ctx.get("content", "")
+    if not force and content == _last_injected_content:
+        return
+    _last_injected_content = content
     console.print(Panel(
-        Text(ctx["content"], style="dim white"),
+        Text(content, style="dim white"),
         title="[dim]late injection[/dim]",
         border_style="dim",
         padding=(0, 1),
@@ -372,6 +396,82 @@ def render_agent(content: str) -> None:
     ))
 
 
+# ── loop detection ────────────────────────────────────────────────────────────
+
+class LoopDetector:
+    """Tracks tool calls across turns to detect and prevent infinite loops."""
+    def __init__(self, max_consecutive: int = 3, max_window: int = 8) -> None:
+        self.history: list[tuple[str, str]] = []
+        self.max_consecutive = max_consecutive
+        self.max_window = max_window
+
+    def normalize(self, name: str, args: dict | str) -> str:
+        if isinstance(args, str):
+            try:
+                args = parse_args(args)
+            except Exception:
+                return args.strip()
+        if isinstance(args, dict):
+            try:
+                return json.dumps(args, sort_keys=True, ensure_ascii=False)
+            except Exception:
+                return str(args)
+        return str(args)
+
+    def check(self, name: str, args: dict | str) -> tuple[str, str | None]:
+        """
+        Evaluate if this tool call represents a repetitive loop.
+        Returns:
+            ("ok", None) - proceed normally
+            ("warn", msg) - warn the model, skip re-running identical tool
+            ("halt", msg) - hard stop the entire agent loop
+        """
+        sig = (name, self.normalize(name, args))
+        self.history.append(sig)
+
+        # 1. Consecutive identical calls (across turns or within same turn)
+        consecutive = 0
+        for s in reversed(self.history):
+            if s == sig:
+                consecutive += 1
+            else:
+                break
+
+        if consecutive >= self.max_consecutive:
+            return "halt", (
+                f"Loop limit exceeded: tool '{name}' called {consecutive} times consecutively "
+                "with identical arguments. Stopping agent loop."
+            )
+
+        if consecutive == 2:
+            return "warn", (
+                f"Error: loop detected. You already called '{name}' with these exact arguments "
+                "on the previous call and received that result. Do not retry identical calls. "
+                "If your work is done, output your final response to the user. "
+                "If an action failed, change your approach."
+            )
+
+        # 2. Oscillating / ping-pong loop, e.g. [A, B, A, B, A, B]
+        if len(self.history) >= 6:
+            recent = self.history[-6:]
+            if recent[0] == recent[2] == recent[4] and recent[1] == recent[3] == recent[5]:
+                return "halt", (
+                    f"Oscillating loop detected between '{recent[0][0]}' and '{recent[1][0]}'. "
+                    "Stopping agent loop to prevent infinite cycling."
+                )
+
+        # 3. Excessive repetitions in recent window (e.g. 4+ times in last 8 calls)
+        window = self.history[-self.max_window:]
+        same_count = sum(1 for s in window if s == sig)
+        if same_count >= 4:
+            return "halt", (
+                f"Repetition limit exceeded: tool '{name}' called {same_count} times in the last "
+                f"{len(window)} tool calls. Stopping agent loop."
+            )
+
+        return "ok", None
+
+
 # ── agent loop ────────────────────────────────────────────────────────────────
 
 def run_agent(user_input: str, hist: History) -> None:
@@ -380,12 +480,16 @@ def run_agent(user_input: str, hist: History) -> None:
 
     usage     = None
     MAX_TURNS = 20
-    _last_call: tuple | None = None   # tracks only the immediately previous call
+    loop_detector  = LoopDetector()
+    halted_by_loop = False
+
+    global _last_injected_content
+    _last_injected_content = None
 
     for turn in range(MAX_TURNS):
         injected_ctx = build_context()
         injected     = hist.inject(injected_ctx)
-        render_late_injection(injected_ctx)
+        render_late_injection(injected_ctx, force=(turn == 0))
 
         with working("Thinking…"):
             message, usage = call_llm(injected, tools=TOOL_SCHEMAS)
@@ -394,8 +498,6 @@ def run_agent(user_input: str, hist: History) -> None:
 
         if message.content:
             render_agent(message.content)
-
-        _last_call = None   # reset between turns — only catch same-turn repeats
 
         # ── compaction check ──────────────────────────────────────────
         if compaction_needed(usage):
@@ -414,26 +516,38 @@ def run_agent(user_input: str, hist: History) -> None:
 
         results: dict[str, str] = {}
 
-        # Deduplicate task calls by description — identical questions get one answer
-        seen_descriptions: set[str] = set()
-        deduped_tasks = []
+        # ── Check loop detector for task calls ──
+        tasks_to_run = []
         for tc in task_calls:
+            action, msg = loop_detector.check("task", tc.function.arguments)
+            if action == "halt":
+                results[tc.id] = msg
+                console.print(f"[bold red]🛑 Halting: {msg}[/bold red]")
+                halted_by_loop = True
+            elif action == "warn":
+                results[tc.id] = msg
+            else:
+                tasks_to_run.append(tc)
+
+        # Deduplicate task calls by description — identical questions get one answer
+        seen_descriptions: dict[str, str] = {}
+        unique_tasks = []
+        for tc in tasks_to_run:
             try:
                 desc = parse_args(tc.function.arguments).get("description", "")
             except ValueError:
                 desc = tc.function.arguments
             if desc in seen_descriptions:
-                results[tc.id] = "Duplicate subagent call — same question already sent."
+                pass  # duplicate within the same batch; will copy result below
             else:
-                seen_descriptions.add(desc)
-                deduped_tasks.append(tc)
-        task_calls = deduped_tasks
+                seen_descriptions[desc] = tc.id
+                unique_tasks.append(tc)
 
-        # Run task calls in parallel
-        if task_calls:
-            with ThreadPoolExecutor(max_workers=len(task_calls)) as pool:
+        # Run unique task calls in parallel
+        if unique_tasks:
+            with ThreadPoolExecutor(max_workers=len(unique_tasks)) as pool:
                 futures = {}
-                for tc in task_calls:
+                for tc in unique_tasks:
                     try:
                         args = parse_args(tc.function.arguments)
                     except ValueError as e:
@@ -448,7 +562,20 @@ def run_agent(user_input: str, hist: History) -> None:
                     except Exception as e:
                         results[tc.id] = f"Subagent error: {e}"
 
-        # Append task results in original order, render each
+        # Copy results to duplicate task calls in the batch
+        for tc in tasks_to_run:
+            if tc.id not in results:
+                try:
+                    desc = parse_args(tc.function.arguments).get("description", "")
+                except ValueError:
+                    desc = tc.function.arguments
+                primary_id = seen_descriptions.get(desc)
+                if primary_id and primary_id in results:
+                    results[tc.id] = results[primary_id]
+                else:
+                    results[tc.id] = "Duplicate subagent call."
+
+        # Append task results for ALL task_calls in original order, render each
         for tc in task_calls:
             result = results.get(tc.id, "No result.")
             try:
@@ -458,6 +585,9 @@ def run_agent(user_input: str, hist: History) -> None:
             hist.append_tool_result(tc.id, result)
             render_tool_call(tc.function.name, cap_args(tc.function.name, args),
                              result if SHOW_TOOL_RESULT else None)
+
+        if halted_by_loop:
+            break
 
         # Run all other tool calls sequentially
         for tool_call in other_calls:
@@ -488,46 +618,54 @@ def run_agent(user_input: str, hist: History) -> None:
                     render_tool_call(name, args, result if SHOW_TOOL_RESULT else None)
                     continue
 
+            # Loop detection
+            l_action, l_msg = loop_detector.check(name, args)
+            if l_action == "halt":
+                hist.append_tool_result(tool_call.id, l_msg)
+                render_tool_call(name, cap_args(name, args), l_msg if SHOW_TOOL_RESULT else None)
+                console.print(f"[bold red]🛑 Halting: {l_msg}[/bold red]")
+                halted_by_loop = True
+                break
+
+            if l_action == "warn":
+                hist.append_tool_result(tool_call.id, l_msg)
+                render_tool_call(name, cap_args(name, args), l_msg if SHOW_TOOL_RESULT else None)
+                continue
+
             with working(f"{TOOL_ICONS.get(name, '🔧')} {name}…"):
                 if name not in TOOLS:
                     result = f"Error: unknown tool '{name}'"
                 else:
-                    # Loop detection — same tool+args on back-to-back calls only
-                    call_sig = (name, tool_call.function.arguments)
-                    if call_sig == _last_call:
-                        result = (
-                            f"Error: you just called {name} with the same arguments "
-                            "and got the same result. Change your approach — don't retry identical calls."
-                        )
-                        _last_call = None   # reset so it doesn't block forever
-                    else:
-                        _last_call = call_sig
-                        fn      = TOOLS[name]
-                        valid   = inspect.signature(fn).parameters
-                        cleaned = {k: v for k, v in args.items() if k in valid}
-                        result  = fn(**cleaned)
+                    fn      = TOOLS[name]
+                    valid   = inspect.signature(fn).parameters
+                    cleaned = {k: v for k, v in args.items() if k in valid}
+                    result  = fn(**cleaned)
 
             hist.append_tool_result(tool_call.id, result)
             # render compressed args so the panel doesn't flood the screen
             render_tool_call(name, cap_args(name, args), result if SHOW_TOOL_RESULT else None)
 
+        if halted_by_loop:
+            break
+
     else:
-        console.print(f"[yellow]⚠ Reached {MAX_TURNS}-turn limit.[/yellow]")
-        # Inject a system nudge so the model emits a checkpoint on the next user message
-        hist.append({
-            "role": "user",
-            "content": (
-                "You have reached the turn limit. "
-                "Emit a concise checkpoint: original goal, completed work, "
-                "files changed, remaining work, blockers, and exact next action. "
-                "Do not restart — the user will say 'continue' to resume."
-            ),
-        })
-        with working("Checkpointing…"):
-            checkpoint_msg, _ = call_llm(hist.inject(build_context()), tools=TOOL_SCHEMAS)
-        hist.append(checkpoint_msg.model_dump(exclude_none=True))
-        if checkpoint_msg.content:
-            render_agent(checkpoint_msg.content)
+        if not halted_by_loop:
+            console.print(f"[yellow]⚠ Reached {MAX_TURNS}-turn limit.[/yellow]")
+            # Inject a system nudge so the model emits a checkpoint on the next user message
+            hist.append({
+                "role": "user",
+                "content": (
+                    "You have reached the turn limit. "
+                    "Emit a concise checkpoint: original goal, completed work, "
+                    "files changed, remaining work, blockers, and exact next action. "
+                    "Do not restart — the user will say 'continue' to resume."
+                ),
+            })
+            with working("Checkpointing…"):
+                checkpoint_msg, _ = call_llm(hist.inject(build_context()), tools=None)
+            hist.append(checkpoint_msg.model_dump(exclude_none=True))
+            if checkpoint_msg.content:
+                render_agent(checkpoint_msg.content)
 
     if usage:
         render_usage(usage)
@@ -586,6 +724,10 @@ if __name__ == "__main__":
 
         if query == "/clear":
             hist.reset()
+            from todos import clear_todos
+            clear_todos()
+            from context import SEEN
+            SEEN.clear()
             console.print("[dim]History cleared.[/dim]")
             continue
 

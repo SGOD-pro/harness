@@ -24,7 +24,14 @@ def note_read(path: str) -> None:
 
 def stale_files() -> list[str]:
     """Return paths the agent has read that have been modified since."""
-    return [p for p, mtime in SEEN.items() if os.path.getmtime(p) != mtime]
+    stale = []
+    for p, mtime in list(SEEN.items()):
+        try:
+            if os.path.exists(p) and os.path.getmtime(p) != mtime:
+                stale.append(p)
+        except OSError:
+            pass
+    return stale
 
 
 def stale_note() -> str:
@@ -74,7 +81,7 @@ def build_context() -> dict:
     )
 
     return {
-        "role": "user",
+        "role": "system",
         "content": (
             "<env>\n"
             f"time: {datetime.now().strftime('%Y-%m-%d %H:%M')}\n"

@@ -54,13 +54,25 @@ def get_todos() -> list[dict]:
     return _todos
 
 
+def clear_todos() -> None:
+    """Clear all todos for a new session or reset."""
+    global _todos
+    _todos = []
+
+
 def todos_prompt() -> str:
     """Render the todo list as a plain-text block for context injection."""
     if not _todos:
         return ""
     lines = []
+    all_done = True
     for t in _todos:
+        if t["status"] != "done":
+            all_done = False
         icon = STATUS_ICON.get(t["status"], "[ ]")
         label = t["activeForm"] if t["status"] == "in_progress" else t["content"]
         lines.append(f"{icon} {label}")
-    return "\n".join(lines)
+    prompt = "\n".join(lines)
+    if all_done and _todos:
+        prompt += "\n(All planned tasks are complete. If your goal is fulfilled, provide your final response and do not call more tools.)"
+    return prompt

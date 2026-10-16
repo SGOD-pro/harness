@@ -110,6 +110,7 @@ def write_file(path: str, content: str) -> str:
     try:
         resolved.parent.mkdir(parents=True, exist_ok=True)
         resolved.write_text(content)
+        note_read(str(resolved))
         return f"Successfully wrote to {resolved.relative_to(PLAYGROUND_DIR)}"
     except Exception as e:
         return f"Error writing file: {e}"
@@ -129,6 +130,7 @@ def str_replace(path: str, old_str: str, new_str: str, allow_multi_edit: bool = 
             return f"Error: old_str matches {count} locations — be more specific or set allow_multi_edit=true"
         updated = content.replace(old_str, new_str)
         resolved.write_text(updated)
+        note_read(str(resolved))
         replaced = count if allow_multi_edit else 1
         return f"Successfully replaced {replaced} occurrence(s) in {resolved.relative_to(PLAYGROUND_DIR)}"
     except Exception as e:
