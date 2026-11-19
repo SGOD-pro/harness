@@ -10,8 +10,8 @@ class TextDelta:
     def __str__(self):
         return self.content
 
-@dataclass
-class EventType(str,Enum):
+
+class StreamEventType(str,Enum):
     TEXT_DELTA = "text_delta"
     MESSAGE_COMPLETE="message completed"
     ERROR= "error"
