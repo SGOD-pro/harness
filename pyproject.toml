@@ -11,10 +11,12 @@ dependencies = [
     "boto3>=1.43.98",
     "click>=8.5.0",
     "openai>=3.16.2",
+    "pydantic>=2.13.5",
     "python-dotenv>=1.2.3",
     "pyyaml>=6.0.3",
     "requests>=2.34.2",
     "rich>=15.0.0",
+    "tiktoken>=0.14.0",
 ]
 
 [project.scripts]
