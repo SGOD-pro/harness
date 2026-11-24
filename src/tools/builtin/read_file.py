@@ -92,7 +92,7 @@ class ReadFileTool(Tool):
 
             
             output = "\n".join(foramted_lines)
-            token_count=count_tokens(output)
+            token_count=count_tokens(output,"qwen.qwen3-32b")
 
             truncated=False
             if token_count > self.MAX_OUTPUT_TOKENS:
@@ -107,7 +107,7 @@ class ReadFileTool(Tool):
             if start_idx > 0 or end_idx < total_lines:
                 metadata_lines.append(f"Showing lines {start_idx + 1} - {end_idx} of {total_lines}")
 
-            if metadat_lines:
+            if metadata_lines:
                 header = " | ".join(metadata_lines) + "\n\n"
                 output = header + output
 

@@ -1,6 +1,6 @@
 from prompts.system import get_system_prompt
 from config.config import Config
-from dataclasses import dataclass
+from dataclasses import dataclass,field
 from utils.text import count_tokens
 from typing import Any
 
@@ -9,9 +9,17 @@ class MessageItem:
     role: str
     content: str
     token_count: int | None
+    tool_call_id:str | None=None
+    tool_calls: list[dict[str,Any]]=field(default_factory=list)
+
 
     def to_dict(self) -> int | None:
         result: dict[str, Any] = {'role': self.role}
+        if self.role == 'tool':
+            result['tool_call_id']=self.tool_call_id
+        
+        if self.tool_calls:
+            result['tool_call']=self.tool_calls
 
         if self.content:
             result['content']=self.content
@@ -39,6 +47,16 @@ class ContextManager:
             role="assistant",
             content=content or "",
             token_count=count_tokens(text=content,model=self._model_name)
+        )
+
+        self._messages.append(item)
+
+    def add_tool_result(self,tool_id:str,content:str):
+        item = MessageItem(
+            role='tool',
+            content=content,
+            tool_call_id=tool_id,
+            token_count=count_tokens(content,self._model_name)
         )
 
         self._messages.append(item)

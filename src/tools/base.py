@@ -14,7 +14,7 @@ class ToolConfirmation:
 
 @dataclass
 class ToolInvocation:
-    parms: dict[str, Any]
+    params: dict[str, Any]
     cwd: Path
 
 @dataclass
@@ -32,7 +32,13 @@ class ToolResult:
     @classmethod
     def sucess_result(cls, output: str = "", **kwargs: Any):
         return cls(sucess=True, output=output, error=None, **kwargs)
-
+    
+    # @classmethod
+    def to_model_ouput(self) -> str:
+        if self.sucess:
+            return self.output
+        
+        return f"Error: {self.error} \n\n Output: \n {self.output}"
 
 class ToolKind(str, Enum):
     READ = 'read'
@@ -86,12 +92,12 @@ class Tool(abc.ABC):
         }
 
     async def get_confirmation(self, invocation: ToolInvocation) -> ToolConfirmation | None:
-        if not self.is_mutating(invocation.parms):
+        if not self.is_mutating(invocation.params):
             return None
 
         return ToolConfirmation(
             tool_name=self.name,
-            params=invocation.parms,
+            params=invocation.params,
             description=f"Execute {self.name}",
         )
 

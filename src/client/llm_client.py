@@ -59,6 +59,9 @@ class LLMClient:
                 "stream":stream,
             }
 
+        if stream:
+            kwargs['stream_options'] = {"include_usage": True}
+
         if tools:
             kwargs['tools']=self.__build_tools(tools)
             kwargs['tool_choice'] = 'auto'

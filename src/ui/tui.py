@@ -2,6 +2,7 @@ from rich.console import Console
 from rich.theme import Theme
 from rich.rule import Rule
 from rich.text import Text
+from typing import Any
 AGENT_THEME = Theme(
     {
         # General
@@ -57,7 +58,7 @@ class TUI:
     def __init__(self,console:Console) -> None:
         self.console=console or get_console()
         self._assistant_stream_open= False
-        
+        self._tool_args_by_call_id:dict[str,dict[str,Any]=]={}
     def begin_assist(self) -> None:
         self.console.print()
         self.console.print(Rule(Text("Assistant",style="assistant")))
@@ -69,4 +70,12 @@ class TUI:
         if self._assistant_stream_open:
             self.console.print()
         self._assistant_stream_open=False
+
+    def tool_call_start(self,call_id:str,name:str,arguments:dict[str,Any],tool_kind:str) -> None:
+        self._tool_args_by_call_id[call_id]=arguments
+        border_style= f"tool.{tool_kind}" if took_kind
+
+        # 5:15
+        
+
         

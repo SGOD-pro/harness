@@ -43,7 +43,7 @@ class ToolCallDelta:
 
 @dataclass
 class ToolCall:
-    call_id:str
+    call_id:str = ""
     name:str|None = None
     arguments: str = ""
 
@@ -59,6 +59,21 @@ class StreamEvent:
 
     tool_call_delta: ToolCallDelta|None = None
     tool_call: ToolCall|None = None
+
+
+@dataclass
+class ToolResultMessage:
+    tool_call_id:str
+    content: str
+    is_error:bool = False
+
+    @property
+    def to_openai_message(self) -> dict[str,Any]:
+        return {
+            'role':'tool',
+            'tool_call_id':self.tool_call_id,
+            'content': self.content
+        }
 
 import json
 def parse_tool_call_arguments(arguments_str:str) -> dict[str,Any]:

@@ -29,6 +29,7 @@ class CLI:
         final_res: str | None = None
 
         async for event in self.agent.run(message):
+            print(event)
             if event.type == AgentEventType.TEXT_DELTA:
                content = event.data.get("content","")
                if not assistant_streaming:
@@ -45,7 +46,18 @@ class CLI:
                 error = event.data.get("error","Unknown error")
                 # if assistant_streaming:
                 console.print(f"\n[error] Error: {error} [/error]")
+            
+            elif event.type == AgentEventType.TOOL_CALL_START:
+                tool_name=event.data.get("name","pata nehi")
+                tool=self.agent.tool_registry.get(tool_name)
+                tool_kind=None
+                if not tool:
+                    tool_kind = None
 
+                tool_kind=tool.kind.value
+                self.tui.tool_call_start(
+                    ...
+                )
 
         if assistant_streaming:
             self.tui.end_assist()
